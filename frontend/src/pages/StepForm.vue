@@ -83,12 +83,21 @@ async function submit() {
 }
 
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    const occupied = await stepStore.finish(id);
+    if (occupied) ElMessage.success('步骤已完成');
+    else ElMessage.info('该步骤已完成（可能由其他页签操作）');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '步骤完成失败');
+  }
 }
 async function rollback(id: string) {
-  await stepStore.rollback(id);
-  ElMessage.warning('步骤已回退');
+  try {
+    await stepStore.rollback(id);
+    ElMessage.warning('步骤已回退，占用数量已释放');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '步骤回退失败');
+  }
 }
 
 onMounted(async () => {

@@ -3,10 +3,11 @@ import type { Clock } from '../types/clock';
 import type { MovementPart } from '../types/part';
 import type { RepairStep } from '../types/step';
 import type { TimekeepingTest } from '../types/test';
+import type { Claim, Stock } from '../types/stock';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
 class ClockRepairDB extends Dexie {
@@ -14,6 +15,8 @@ class ClockRepairDB extends Dexie {
   parts!: Table<MovementPart, string>;
   steps!: Table<RepairStep, string>;
   tests!: Table<TimekeepingTest, string>;
+  stocks!: Table<Stock, string>;
+  claims!: Table<Claim, string>;
 
   constructor() {
     super(DB_NAME);
@@ -47,6 +50,62 @@ class ClockRepairDB extends Dexie {
           .modify((row: any) => {
             if (row.positions === undefined) row.positions = [];
           });
+      });
+    // v3：批号库存 + 领用账；旧数据按已用量回填待核
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion',
+        stocks: 'id, lot, status',
+        claims: 'id, lot, partId, stepId, clockId',
+      })
+      .upgrade(async (tx) => {
+        const allParts = await tx.table('parts').toArray();
+        const allSteps = await tx.table('steps').toArray();
+        const doneSteps = allSteps.filter((s: any) => s.state === 'done');
+        const referenced = new Set<string>();
+        for (const s of doneSteps) for (const pid of s.partIds ?? []) referenced.add(pid);
+
+        const lots = Array.from(
+          new Set(
+            allParts
+              .map((p: any) => (p.sourceLot ?? '').trim())
+              .filter((lot: string) => lot.length > 0),
+          ),
+        );
+
+        for (const lot of lots) {
+          const lotParts = allParts.filter((p: any) => (p.sourceLot ?? '').trim() === lot);
+          const usedQty = lotParts
+            .filter((p: any) => referenced.has(p.id))
+            .reduce((sum: number, p: any) => sum + (p.qtyNeeded ?? 0), 0);
+          await tx.table('stocks').put({
+            id: newId('stk'),
+            lot,
+            qtyTotal: usedQty,
+            status: 'pending',
+            note: '旧数据回填，待核',
+          } satisfies Stock);
+
+          for (const step of doneSteps) {
+            for (const pid of step.partIds ?? []) {
+              const part = lotParts.find((p: any) => p.id === pid);
+              if (!part) continue;
+              if (part.decision === '保留' || part.wearState === '完好') continue;
+              await tx.table('claims').put({
+                id: newId('clm'),
+                lot,
+                partId: pid,
+                stepId: step.id,
+                clockId: step.clockId,
+                qty: part.qtyNeeded ?? 0,
+                claimedAt: step.finishedAt ?? Date.now(),
+              } satisfies Claim);
+            }
+          }
+        }
       });
   }
 }
@@ -231,10 +290,44 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  await db.transaction('rw', db.clocks, db.parts, db.steps, db.tests, async () => {
-    await db.clocks.bulkPut(clocks);
-    await db.parts.bulkPut(parts);
-    await db.steps.bulkPut(steps);
-    await db.tests.bulkPut(tests);
-  });
+  // 批号库存：入库总数
+  const stocks: Stock[] = [
+    { id: newId('stk'), lot: 'MS-2024-07', qtyTotal: 10, status: 'normal', note: '' },
+    { id: newId('stk'), lot: 'JWL-18', qtyTotal: 20, status: 'normal', note: '' },
+  ];
+
+  // 领用账：已完成工序按零件实际用量占用批号数量
+  const claims: Claim[] = [
+    {
+      id: newId('clm'),
+      lot: 'MS-2024-07',
+      partId: parts[0].id,
+      stepId: steps[0].id,
+      clockId: clockA,
+      qty: parts[0].qtyNeeded,
+      claimedAt: steps[0].finishedAt ?? now,
+    },
+    {
+      id: newId('clm'),
+      lot: 'JWL-18',
+      partId: parts[1].id,
+      stepId: steps[1].id,
+      clockId: clockA,
+      qty: parts[1].qtyNeeded,
+      claimedAt: steps[1].finishedAt ?? now,
+    },
+  ];
+
+  await db.transaction(
+    'rw',
+    [db.clocks, db.parts, db.steps, db.tests, db.stocks, db.claims],
+    async () => {
+      await db.clocks.bulkPut(clocks);
+      await db.parts.bulkPut(parts);
+      await db.steps.bulkPut(steps);
+      await db.tests.bulkPut(tests);
+      await db.stocks.bulkPut(stocks);
+      await db.claims.bulkPut(claims);
+    },
+  );
 }

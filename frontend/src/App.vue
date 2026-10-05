@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { readDbVersion } from './utils/db';
+import { useClockStore } from './stores/clockStore';
+import { usePartStore } from './stores/partStore';
+import { useStepStore } from './stores/stepStore';
+import { useStockStore } from './stores/stockStore';
 
 const route = useRoute();
 const router = useRouter();
+const clockStore = useClockStore();
+const partStore = usePartStore();
+const stepStore = useStepStore();
+const stockStore = useStockStore();
 
 const activeMenu = computed(() => {
   if (route.path.startsWith('/clocks')) return '/clocks';
   if (route.path.startsWith('/steps')) return '/steps/new';
   if (route.path.startsWith('/parts')) return '/parts';
+  if (route.path.startsWith('/stocks')) return '/stocks';
   if (route.path.startsWith('/tests')) return '/tests';
   return '/clocks';
 });
@@ -23,6 +32,19 @@ function onSelect(index: string) {
   }
   void router.push(index);
 }
+
+/** 页签重新可见时拉取其他页签的提交（并发领用后保持账实一致） */
+function reloadOnVisible() {
+  if (document.visibilityState !== 'visible') return;
+  void Promise.all([clockStore.load(), partStore.load(), stepStore.load(), stockStore.load()]);
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', reloadOnVisible);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', reloadOnVisible);
+});
 </script>
 
 <template>
@@ -33,6 +55,7 @@ function onSelect(index: string) {
         <el-menu-item index="/clocks">钟表台账</el-menu-item>
         <el-menu-item index="/steps/new">工序录入</el-menu-item>
         <el-menu-item index="/parts">零件清单</el-menu-item>
+        <el-menu-item index="/stocks">批号库存</el-menu-item>
         <el-menu-item index="/tests">走时测试</el-menu-item>
       </el-menu>
       <el-tag size="small" effect="plain">本地结构版本 v{{ version }}</el-tag>

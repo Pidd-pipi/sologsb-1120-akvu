@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { db, toPlain } from '../utils/db';
 import { newId } from '../utils/id';
+import { useStockStore } from './stockStore';
 import type { RepairStep, RepairStepDraft } from '../types/step';
 import type { TimekeepingTest, TimekeepingTestDraft } from '../types/test';
 
@@ -33,15 +34,21 @@ export const useStepStore = defineStore('step', {
       this.items = [...this.items, record];
       return record;
     },
+    /**
+     * 完成工序：由领用账按零件实际用量占用批号数量，容量不足则拒绝并回滚。
+     * 占用与改状态在同一事务内，并发页签只有一个能保存。
+     */
     async finish(id: string) {
-      const patch: Partial<RepairStep> = { state: 'done', finishedAt: Date.now() };
-      await db.steps.update(id, patch);
-      this.items = this.items.map((it) => (it.id === id ? { ...it, ...patch } : it));
+      const occupied = await useStockStore().occupyStep(id);
+      await this.load();
+      await useStockStore().load();
+      return occupied;
     },
+    /** 回退工序：释放该工序已占用的全部数量，进度重算 */
     async rollback(id: string) {
-      const patch: Partial<RepairStep> = { state: 'rolledback', finishedAt: undefined };
-      await db.steps.update(id, patch);
-      this.items = this.items.map((it) => (it.id === id ? { ...it, ...patch } : it));
+      await useStockStore().releaseStep(id);
+      await this.load();
+      await useStockStore().load();
     },
     /** 上下移动排序：交换两个相邻步骤的 seq */
     async swapSeq(aId: string, bId: string) {

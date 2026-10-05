@@ -8,6 +8,7 @@ import {
   PART_DECISIONS,
   PART_NAMES,
   WEAR_STATES,
+  type MovementPart,
   type MovementPartDraft,
   type PartDecision,
   type PartName,
@@ -21,10 +22,32 @@ const wearFilter = ref<WearState | 'all'>('all');
 const clockFilter = ref('all');
 const onlyPending = ref(false);
 const dialogVisible = ref(false);
+const editVisible = ref(false);
 const error = ref('');
+const editError = ref('');
 
 const form = reactive<MovementPartDraft>({
   clockId: '',
+  name: '发条',
+  qtyNeeded: 1,
+  position: '',
+  wearState: '磨损',
+  decision: '修配',
+  sourceLot: '',
+  dimension: 1,
+});
+
+const editForm = reactive<{
+  id: string;
+  name: PartName;
+  qtyNeeded: number;
+  position: string;
+  wearState: WearState;
+  decision: PartDecision;
+  sourceLot: string;
+  dimension: number;
+}>({
+  id: '',
   name: '发条',
   qtyNeeded: 1,
   position: '',
@@ -82,8 +105,51 @@ async function submit() {
 }
 
 async function setDecision(id: string, decision: PartDecision) {
-  await partStore.update(id, { decision });
-  ElMessage.success(`处理决定已改为「${decision}」`);
+  try {
+    await partStore.update(id, { decision });
+    ElMessage.success(`处理决定已改为「${decision}」`);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '修改失败');
+  }
+}
+
+function openEdit(part: MovementPart) {
+  editForm.id = part.id;
+  editForm.name = part.name;
+  editForm.qtyNeeded = part.qtyNeeded;
+  editForm.position = part.position;
+  editForm.wearState = part.wearState;
+  editForm.decision = part.decision;
+  editForm.sourceLot = part.sourceLot;
+  editForm.dimension = part.dimension;
+  editError.value = '';
+  editVisible.value = true;
+}
+
+async function submitEdit() {
+  if (!editForm.position.trim()) {
+    editError.value = '装配位置必填';
+    return;
+  }
+  if (editForm.qtyNeeded < 1) {
+    editError.value = '数量至少为 1';
+    return;
+  }
+  try {
+    await partStore.update(editForm.id, {
+      name: editForm.name,
+      qtyNeeded: editForm.qtyNeeded,
+      position: editForm.position.trim(),
+      wearState: editForm.wearState,
+      decision: editForm.decision,
+      sourceLot: editForm.sourceLot.trim(),
+      dimension: editForm.dimension,
+    });
+    editVisible.value = false;
+    ElMessage.success('用量已更新，领用账已重算');
+  } catch (e) {
+    editError.value = e instanceof Error ? e.message : '修改失败';
+  }
 }
 
 onMounted(async () => {
@@ -156,6 +222,11 @@ onMounted(async () => {
             <span v-else>—</span>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="110">
+          <template #default="{ row }">
+            <el-button size="small" @click="openEdit(row)">修改用量</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <el-empty v-if="group.rows.length === 0" description="该状态暂无零件" :image-size="60" />
     </el-card>
@@ -201,6 +272,44 @@ onMounted(async () => {
         <el-button type="primary" @click="submit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="editVisible" title="修改用量（领用账将重算）" width="560px">
+      <el-alert v-if="editError" :title="editError" type="error" :closable="false" style="margin-bottom: 10px" />
+      <el-form :model="editForm" label-width="110px">
+        <el-form-item label="零件名称">
+          <el-select v-model="editForm.name" style="width: 100%">
+            <el-option v-for="n in PART_NAMES" :key="n" :label="n" :value="n" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="数量">
+          <el-input-number v-model="editForm.qtyNeeded" :min="1" :max="999" />
+          <span class="hint">已完成工序占用量将同步增减</span>
+        </el-form-item>
+        <el-form-item label="装配位置" required>
+          <el-input v-model="editForm.position" />
+        </el-form-item>
+        <el-form-item label="磨损状态">
+          <el-select v-model="editForm.wearState" style="width: 100%">
+            <el-option v-for="w in WEAR_STATES" :key="w" :label="w" :value="w" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="处理决定">
+          <el-select v-model="editForm.decision" style="width: 100%">
+            <el-option v-for="d in PART_DECISIONS" :key="d" :label="d" :value="d" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="来源批号">
+          <el-input v-model="editForm.sourceLot" placeholder="如 MS-2024-07" />
+        </el-form-item>
+        <el-form-item label="关键尺寸 mm">
+          <el-input-number v-model="editForm.dimension" :min="0" :max="200" :step="0.1" :precision="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitEdit">保存并重算领用账</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -226,5 +335,10 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.hint {
+  margin-left: 10px;
+  color: #7b8592;
+  font-size: 13px;
 }
 </style>
