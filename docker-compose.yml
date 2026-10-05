@@ -1,0 +1,9 @@
+name: gbclockrepair
+
+services:
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-gbclockrepair}-frontend
+    ports:
+      - "${FRONTEND_PORT:-21820}:80"
+    restart: unless-stopped
