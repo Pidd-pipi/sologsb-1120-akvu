@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { readDbVersion } from './utils/db';
+import { onSyncChange } from './utils/sync';
+import { useClockStore } from './stores/clockStore';
+import { usePartStore } from './stores/partStore';
+import { useStepStore } from './stores/stepStore';
+import { useLotStore } from './stores/lotStore';
 
 const route = useRoute();
 const router = useRouter();
+
+const clockStore = useClockStore();
+const partStore = usePartStore();
+const stepStore = useStepStore();
+const lotStore = useLotStore();
 
 const activeMenu = computed(() => {
   if (route.path.startsWith('/clocks')) return '/clocks';
@@ -15,6 +25,18 @@ const activeMenu = computed(() => {
 });
 
 const version = readDbVersion();
+
+// 其他页签提交后重拉数据：抢最后一枚失败的一方立即看到真实余量
+let offSync: (() => void) | null = null;
+onMounted(() => {
+  offSync = onSyncChange(() => {
+    void clockStore.load();
+    void partStore.load();
+    void stepStore.load();
+    void lotStore.load();
+  });
+});
+onUnmounted(() => offSync?.());
 
 function onSelect(index: string) {
   if (index === '/tests') {

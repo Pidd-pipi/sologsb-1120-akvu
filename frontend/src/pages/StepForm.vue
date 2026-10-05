@@ -4,8 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
-import { useStepStore } from '../stores/stepStore';
+import { useStepStore, StepConflictError } from '../stores/stepStore';
+import { useLotStore } from '../stores/lotStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
+import { InventoryError } from '../utils/inventory';
 import StepSequence from '../components/common/StepSequence.vue';
 import { STEP_FIELD_MAP, STEP_TYPES, type RepairStepDraft, type StepType } from '../types/step';
 
@@ -14,6 +16,7 @@ const router = useRouter();
 const clockStore = useClockStore();
 const partStore = usePartStore();
 const stepStore = useStepStore();
+const lotStore = useLotStore();
 
 const clockId = ref(String(route.query.clockId ?? ''));
 const { steps, total, percent, current, gaps } = useRepairProgress(clockId);
@@ -83,17 +86,31 @@ async function submit() {
 }
 
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    await stepStore.finish(id);
+    ElMessage.success('步骤已完成，批号数量已按实际用量占用');
+  } catch (err) {
+    if (err instanceof InventoryError || err instanceof StepConflictError) {
+      ElMessage.error(err.message);
+    } else {
+      ElMessage.error('完成失败，请重试');
+    }
+  }
 }
 async function rollback(id: string) {
-  await stepStore.rollback(id);
-  ElMessage.warning('步骤已回退');
+  try {
+    await stepStore.rollback(id);
+    ElMessage.warning('步骤已回退，占用的批号数量已释放，钟表进度已重算');
+  } catch (err) {
+    if (err instanceof StepConflictError) ElMessage.error(err.message);
+    else ElMessage.error('回退失败，请重试');
+  }
 }
 
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
+  await lotStore.load();
   await stepStore.load();
   if (!clockId.value && clockStore.items.length > 0) {
     clockId.value = clockStore.items[0].id;

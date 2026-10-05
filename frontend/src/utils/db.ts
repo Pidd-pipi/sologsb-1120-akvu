@@ -1,22 +1,24 @@
 import Dexie, { type Table } from 'dexie';
 import type { Clock } from '../types/clock';
+import type { PartLot } from '../types/lot';
 import type { MovementPart } from '../types/part';
 import type { RepairStep } from '../types/step';
 import type { TimekeepingTest } from '../types/test';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
-class ClockRepairDB extends Dexie {
+export class ClockRepairDB extends Dexie {
   clocks!: Table<Clock, string>;
   parts!: Table<MovementPart, string>;
+  lots!: Table<PartLot, string>;
   steps!: Table<RepairStep, string>;
   tests!: Table<TimekeepingTest, string>;
 
-  constructor() {
-    super(DB_NAME);
+  constructor(name: string = DB_NAME) {
+    super(name);
     // v1：四张业务表
     this.version(1).stores({
       clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
@@ -47,6 +49,40 @@ class ClockRepairDB extends Dexie {
           .modify((row: any) => {
             if (row.positions === undefined) row.positions = [];
           });
+      });
+    // v3：新增批号库存表，把旧零件的来源批号按已用量回填为「待核」库存
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        lots: 'id, lotNo, partName, status',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion',
+      })
+      .upgrade(async (tx) => {
+        const oldParts = (await tx.table('parts').toArray()) as MovementPart[];
+        // 仅为配换零件（非保留）且登记过批号的旧记录建库存；空批号旧记录不当可用
+        const byLot = new Map<string, { partName: MovementPart['name']; qty: number }>();
+        for (const p of oldParts) {
+          const lotNo = (p.sourceLot ?? '').trim();
+          if (!lotNo || p.decision === '保留') continue;
+          const cur = byLot.get(lotNo);
+          if (cur) cur.qty += p.qtyNeeded || 0;
+          else byLot.set(lotNo, { partName: p.name, qty: p.qtyNeeded || 0 });
+        }
+        if (byLot.size > 0) {
+          const now = Date.now();
+          const lots: PartLot[] = Array.from(byLot.entries()).map(([lotNo, v]) => ({
+            id: newId('lot'),
+            lotNo,
+            partName: v.partName,
+            capacity: v.qty,
+            status: 'pending',
+            note: '旧档案迁移：按已登记用量回填，余量为 0，待核账',
+            createdAt: now,
+          }));
+          await tx.table('lots').bulkPut(lots);
+        }
       });
   }
 }
@@ -123,9 +159,15 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  const partSpring = newId('prt');
+  const partJewel = newId('prt');
+  const partBalance = newId('prt');
+  const partSpringB = newId('prt');
+  const partEscape = newId('prt');
+
   const parts: MovementPart[] = [
     {
-      id: newId('prt'),
+      id: partSpring,
       clockId: clockA,
       name: '发条',
       qtyNeeded: 1,
@@ -136,7 +178,7 @@ export async function ensureSeedData(): Promise<void> {
       dimension: 0.35,
     },
     {
-      id: newId('prt'),
+      id: partJewel,
       clockId: clockA,
       name: '宝石轴承',
       qtyNeeded: 4,
@@ -147,7 +189,7 @@ export async function ensureSeedData(): Promise<void> {
       dimension: 1.2,
     },
     {
-      id: newId('prt'),
+      id: partBalance,
       clockId: clockB,
       name: '摆轮',
       qtyNeeded: 1,
@@ -157,6 +199,53 @@ export async function ensureSeedData(): Promise<void> {
       sourceLot: '',
       dimension: 14.5,
     },
+    {
+      id: partSpringB,
+      clockId: clockB,
+      name: '发条',
+      qtyNeeded: 1,
+      position: '条盒内',
+      wearState: '锈蚀',
+      decision: '换新',
+      // 与 clockA 的新发条同一批号：两台钟抢同一批库存
+      sourceLot: 'MS-2024-07',
+      dimension: 0.35,
+    },
+    // 无批号来源的换新件：完成装配时必须拒绝，不能当作有库存
+    {
+      id: partEscape,
+      clockId: clockB,
+      name: '擒纵轮',
+      qtyNeeded: 1,
+      position: '四轮夹板下',
+      wearState: '断裂',
+      decision: '换新',
+      sourceLot: '',
+      dimension: 8.2,
+    },
+  ];
+
+  const lots: PartLot[] = [
+    {
+      id: newId('lot'),
+      lotNo: 'MS-2024-07',
+      partName: '发条',
+      capacity: 1,
+      status: 'verified',
+      note: '同批仅余 1 枚发条：两台钟各领 1 枚时，只有先完成装配的一方成功',
+      createdAt: now - 30 * day,
+      verifiedAt: now - 30 * day,
+    },
+    {
+      id: newId('lot'),
+      lotNo: 'JWL-18',
+      partName: '宝石轴承',
+      capacity: 12,
+      status: 'verified',
+      note: '18 号红宝石轴承批',
+      createdAt: now - 30 * day,
+      verifiedAt: now - 30 * day,
+    },
   ];
 
   const steps: RepairStep[] = [
@@ -165,7 +254,7 @@ export async function ensureSeedData(): Promise<void> {
       clockId: clockA,
       stepType: '拆解',
       seq: 1,
-      partIds: [parts[0].id],
+      partIds: [partSpring],
       cleanSolvent: '',
       cleanMethod: '',
       oilType: '',
@@ -182,7 +271,7 @@ export async function ensureSeedData(): Promise<void> {
       clockId: clockA,
       stepType: '清洗',
       seq: 2,
-      partIds: [parts[1].id],
+      partIds: [partJewel],
       cleanSolvent: '石油醚 + 无水乙醇',
       cleanMethod: '超声',
       oilType: '',
@@ -199,7 +288,7 @@ export async function ensureSeedData(): Promise<void> {
       clockId: clockA,
       stepType: '润滑',
       seq: 3,
-      partIds: [parts[1].id],
+      partIds: [partJewel],
       cleanSolvent: '',
       cleanMethod: '',
       oilType: 'Moebius 9010',
@@ -208,6 +297,38 @@ export async function ensureSeedData(): Promise<void> {
       troubleNote: '',
       operator: '祁仲言',
       startedAt: now - 3 * day,
+      state: 'pending',
+    },
+    {
+      id: newId('stp'),
+      clockId: clockA,
+      stepType: '装配',
+      seq: 4,
+      partIds: [partSpring, partJewel],
+      cleanSolvent: '',
+      cleanMethod: '',
+      oilType: 'Moebius 9501',
+      oilPoints: '条盒轴、上条柄',
+      torque: 0.4,
+      troubleNote: '',
+      operator: '祁仲言',
+      startedAt: now - 2 * day,
+      state: 'pending',
+    },
+    {
+      id: newId('stp'),
+      clockId: clockB,
+      stepType: '装配',
+      seq: 1,
+      partIds: [partBalance, partSpringB, partEscape],
+      cleanSolvent: '',
+      cleanMethod: '',
+      oilType: 'Moebius 9010',
+      oilPoints: '擒纵轮轴、条盒轴',
+      torque: 0.3,
+      troubleNote: '擒纵轮待配齐批号；发条与 A 台共用 MS-2024-07',
+      operator: '祁仲言',
+      startedAt: now - 1 * day,
       state: 'pending',
     },
   ];
@@ -231,9 +352,10 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  await db.transaction('rw', db.clocks, db.parts, db.steps, db.tests, async () => {
+  await db.transaction('rw', db.clocks, db.parts, db.lots, db.steps, db.tests, async () => {
     await db.clocks.bulkPut(clocks);
     await db.parts.bulkPut(parts);
+    await db.lots.bulkPut(lots);
     await db.steps.bulkPut(steps);
     await db.tests.bulkPut(tests);
   });

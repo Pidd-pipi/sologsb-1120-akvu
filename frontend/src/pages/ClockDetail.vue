@@ -4,12 +4,16 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
-import { useStepStore } from '../stores/stepStore';
+import { useStepStore, StepConflictError } from '../stores/stepStore';
+import { useLotStore } from '../stores/lotStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
+import { useLedger } from '../hooks/useLedger';
+import { InventoryError } from '../utils/inventory';
 import StepSequence from '../components/common/StepSequence.vue';
 import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
 import { CONDITION_GRADES, type ConditionGrade } from '../types/clock';
+import { LOT_STATUS_LABEL } from '../types/lot';
 import { judgeTest } from '../types/test';
 
 const route = useRoute();
@@ -17,6 +21,7 @@ const router = useRouter();
 const clockStore = useClockStore();
 const partStore = usePartStore();
 const stepStore = useStepStore();
+const lotStore = useLotStore();
 
 const clockId = computed(() => String(route.params.id ?? ''));
 const clock = computed(() => clockStore.byId(clockId.value));
@@ -25,13 +30,59 @@ const parts = computed(() => partStore.byClock(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
 const activeTab = ref('steps');
 
+const { rows: ledgerRows } = useLedger();
+/** lotNo -> 批号全局余量/状态（占用由所有钟表已完成的装配派生） */
+const lotView = computed(() => {
+  const map = new Map<string, { remaining: number; status: string; occupied: number; partName: string }>();
+  for (const row of ledgerRows.value) {
+    map.set(row.lot.lotNo, {
+      remaining: row.remaining,
+      status: LOT_STATUS_LABEL[row.lot.status],
+      occupied: row.occupied,
+      partName: row.lot.partName,
+    });
+  }
+  // 尚未被任何装配占用的批号也要可展示
+  for (const lot of lotStore.items) {
+    if (!map.has(lot.lotNo)) {
+      map.set(lot.lotNo, {
+        remaining: lot.capacity,
+        status: LOT_STATUS_LABEL[lot.status],
+        occupied: 0,
+        partName: lot.partName,
+      });
+    }
+  }
+  return map;
+});
+
+function lotTagType(lotNo: string): 'success' | 'warning' | 'danger' | 'info' {
+  const v = lotView.value.get(lotNo);
+  if (!v) return 'danger';
+  if (v.status === '待核') return 'warning';
+  return v.remaining <= 0 ? 'danger' : 'success';
+}
+
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    await stepStore.finish(id);
+    ElMessage.success('步骤已完成，批号数量已按实际用量占用');
+  } catch (err) {
+    if (err instanceof InventoryError || err instanceof StepConflictError) {
+      ElMessage.error(err.message);
+    } else {
+      ElMessage.error('完成失败，请重试');
+    }
+  }
 }
 async function rollback(id: string) {
-  await stepStore.rollback(id);
-  ElMessage.warning('步骤已回退');
+  try {
+    await stepStore.rollback(id);
+    ElMessage.warning('步骤已回退，占用的批号数量已释放，钟表进度已重算');
+  } catch (err) {
+    if (err instanceof StepConflictError) ElMessage.error(err.message);
+    else ElMessage.error('回退失败，请重试');
+  }
 }
 async function move(payload: { id: string; direction: 'up' | 'down' }) {
   const list = steps.value;
@@ -54,6 +105,7 @@ async function changeGrade(value: unknown) {
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
+  await lotStore.load();
   await stepStore.load();
 });
 </script>
@@ -124,11 +176,30 @@ onMounted(async () => {
             <el-tab-pane :label="`零件清单（${parts.length}）`" name="parts">
               <el-table :data="parts" size="small" border>
                 <el-table-column prop="name" label="零件" width="110" />
+                <el-table-column prop="qtyNeeded" label="数量" width="70" />
                 <el-table-column prop="position" label="装配位置" min-width="150" />
                 <el-table-column prop="wearState" label="磨损" width="90" />
                 <el-table-column prop="decision" label="处理" width="90" />
-                <el-table-column prop="sourceLot" label="来源批号" width="120" />
-                <el-table-column prop="dimension" label="尺寸 mm" width="100" />
+                <el-table-column label="来源批号 / 余量" min-width="170">
+                  <template #default="{ row }">
+                    <template v-if="row.sourceLot">
+                      <span>{{ row.sourceLot }}</span>
+                      <el-tag
+                        v-if="lotView.get(row.sourceLot)"
+                        size="small"
+                        :type="lotTagType(row.sourceLot)"
+                        style="margin-left: 6px"
+                      >
+                        余 {{ lotView.get(row.sourceLot)?.remaining }}
+                        <template v-if="lotView.get(row.sourceLot)?.status === '待核'"> · 待核</template>
+                      </el-tag>
+                      <el-tag v-else size="small" type="danger" style="margin-left: 6px">无库存记录</el-tag>
+                    </template>
+                    <el-tag v-else-if="row.decision !== '保留'" size="small" type="danger">无来源批号</el-tag>
+                    <span v-else>—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="dimension" label="尺寸 mm" width="90" />
               </el-table>
               <el-empty v-if="parts.length === 0" description="暂无零件登记" :image-size="60" />
             </el-tab-pane>

@@ -58,12 +58,12 @@ sologsb-1120/
         ├── main.ts
         ├── App.vue
         ├── router/index.ts
-        ├── types/{clock,part,step,test}.ts
-        ├── stores/{clock,part,step}Store.ts
+        ├── types/{clock,part,lot,step,test}.ts
+        ├── stores/{clock,part,lot,step}Store.ts
         ├── components/common/{StepSequence,RateChart,ClockCard,StateBadge}.vue
-        ├── hooks/{useClockSearch,useRepairProgress}.ts
+        ├── hooks/{useClockSearch,useRepairProgress,useLedger}.ts
         ├── pages/{ClockList,ClockDetail,StepForm,PartList,TestView}.vue
-        └── utils/{db,timeCalc,id}.ts
+        └── utils/{db,inventory,sync,timeCalc,id}.ts
 ```
 
 ## 页面与路由
@@ -73,18 +73,27 @@ sologsb-1120/
 | `/clocks` | 钟表台账：按种类/机芯/品相/年代区间筛选，按修复状态分栏 | Clock |
 | `/clocks/:id` | 钟表详情：左侧机芯信息，右侧工序流与走时测试记录，可切零件清单 | Clock、RepairStep、TimekeepingTest、MovementPart |
 | `/steps/new` | 新建维修工序：选步骤类型后动态出清洗液/油脂/力矩字段，顺序号冲突即报错 | RepairStep、MovementPart |
-| `/parts` | 零件与配换清单：按磨损状态分组，标出待修配条目与来源批号 | MovementPart |
+| `/parts` | 零件与配换清单：批号库存登记/核账/调容量、按批号汇总的领用账与逐笔明细、按磨损状态分组，内联修改用量与来源批号 | MovementPart、PartLot、RepairStep |
 | `/tests/:clockId` | 走时测试录入与多方位均值计算，生成走时单文本 | TimekeepingTest |
 
 `/` 重定向到 `/clocks`，未匹配路由同样兜底到 `/clocks`。
 
 ## 数据存储说明
 
-- 数据库名 `gbclockrepair`，当前结构版本 **v2**（`localStorage['gbclockrepair:db-version']` 记录）。
-- 四张表：`clocks`（钟表）、`parts`（机芯零件）、`steps`（维修工序）、`tests`（走时测试）。
+- 数据库名 `gbclockrepair`，当前结构版本 **v3**（`localStorage['gbclockrepair:db-version']` 记录）。
+- 五张表：`clocks`（钟表）、`parts`（机芯零件）、`lots`（来源批号库存）、`steps`（维修工序）、`tests`（走时测试）。
 - v1 → v2 迁移：补齐老记录的 `state`、`partIds`、`torque`、`positions` 字段并新增索引。
+- v2 → v3 迁移：新增 `lots` 表；把旧零件中已登记来源批号的配换件（非「保留」）按批号汇总**已用量**回填为「待核」库存（容量=已用量、余量 0），空批号旧记录不入库、不会被当成可用库存；核账后转为「在册」。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 台示范钟表、3 项零件、3 道工序与 1 次走时测试。
+- 首次打开灌入 2 台示范钟表、5 项零件、2 条在册批号库存、5 道工序与 1 次走时测试（两台钟的新发发条款共用只剩 1 枚的批号，可直接复现抢料）。
+
+## 领用账规则（零件 × 工序 × 钟表）
+
+- **占用时机**：只有「装配」工序点「完成」时才占用来源批号，按零件 `qtyNeeded` 实际用量计入；同一零件挂多道工序只记一次，清洗/润滑等工序不占料。
+- **容量拦截**：完成前在单个 IndexedDB 读写事务内校验 `已占用 + 本次 ≤ 批号容量`，不足则整笔回滚并提示「批号 X 容量 N 件，已领用 M 件，还差 K 件」，步骤不会被标完成。
+- **并发提交**：两个页签同时点最后一枚的完成时，IndexedDB 事务串行化提交，只有一方成功；失败方收到容量不足提示并自动刷新真实余量（跨页签通过 BroadcastChannel / storage 事件同步）。
+- **回退与改量**：回退已完成的装配工序即释放该批占用；在零件清单修改用量或来源批号后，领用账与钟表修复进度实时重算（占用由已完成装配派生，不另存台账）。
+- **无来源不发放**：换新/修配零件必须有已登记的在册批号；批号不存在、零件名与批号登记不符、批号处于「待核」状态时一律拒绝完成装配。
 
 ## 功能要点
 
